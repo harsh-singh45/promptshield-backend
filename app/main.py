@@ -14,8 +14,8 @@ app = FastAPI(
 # Attach CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],        # Allows extension scripts and Vite frontend
+    allow_credentials=False,    # MUST be False when allow_origins is ["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )

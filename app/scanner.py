@@ -1,37 +1,58 @@
 # app/scanner.py
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
+from app.config import settings
 from app.recognizers import get_custom_recognizers
 from app.schemas import DetectedEntity
 
 
 class PresidioScanner:
     def __init__(self):
-        # 1. Initialize Registry and load default NLP recognizers (Emails, Names, Credit Cards, etc.)
-        self.registry = RecognizerRegistry()
-        self.registry.load_predefined_recognizers()
+        # 1. Configure and build the spaCy NLP engine FIRST
+        nlp_configuration = {
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "en", "model_name": settings.DEFAULT_SPACY_MODEL}],
+        }
+        nlp_provider = NlpEngineProvider(nlp_configuration=nlp_configuration)
+        self.nlp_engine = nlp_provider.create_engine()
 
-        # 2. Inject our custom LLM security recognizers
+        # 2. Initialize Registry and bind the NLP engine directly to the predefined recognizers
+        self.registry = RecognizerRegistry()
+        self.registry.load_predefined_recognizers(
+            languages=["en"],
+            nlp_engine=self.nlp_engine
+        )
+
+        # 3. Inject our custom Prompt Injection recognizers
         for recognizer in get_custom_recognizers():
             self.registry.add_recognizer(recognizer)
 
-        # 3. Build engines
-        self.analyzer = AnalyzerEngine(registry=self.registry)
+        # 4. Pass BOTH the bound registry and the nlp_engine into AnalyzerEngine
+        self.analyzer = AnalyzerEngine(
+            registry=self.registry,
+            nlp_engine=self.nlp_engine
+        )
         self.anonymizer = AnonymizerEngine()
 
     def analyze_and_sanitize(self, text: str, language: str = "en", threshold: float = 0.60, mode: str = "replace"):
         if not text or not text.strip():
             return [], text
 
-        # Step 1: Run NLP analysis
+        # 5. Normalize language code (e.g., converts 'en-US', 'en_US', 'English' -> 'en')
+        clean_lang = language.lower().split("-")[0].split("_")[0]
+        if clean_lang != "en":
+            clean_lang = "en"  # Fallback to default supported language to prevent 500 errors
+
+        # Step 1: Run NLP analysis with the normalized language code
         results = self.analyzer.analyze(
             text=text,
-            language=language,
+            language=clean_lang,
             score_threshold=threshold
         )
 
-        # Sort results by start index descending to match our frontend logic
+        # Sort results by start index descending to match frontend replacement logic
         results.sort(key=lambda x: x.start, reverse=True)
 
         threats = []
@@ -48,14 +69,11 @@ class PresidioScanner:
         operators = {}
         for t in threats:
             if mode == "mask":
-                # Masks characters with asterisk, e.g., ****1234
                 operators[t.entity_type] = OperatorConfig("mask",
                                                           {"chars_to_mask": 12, "masking_char": "*", "from_end": False})
             elif mode == "redact":
-                # Removes text entirely
                 operators[t.entity_type] = OperatorConfig("redact", {})
             else:
-                # Default: Replaces with tag like [EMAIL_ADDRESS] or [PROMPT_INJECTION_OVERRIDE]
                 operators[t.entity_type] = OperatorConfig("replace", {"new_value": f"[{t.entity_type}]"})
 
         # Step 3: Perform text mutation
@@ -69,5 +87,5 @@ class PresidioScanner:
         return threats[::-1], anonymized_result.text
 
 
-# Create a singleton instance to be imported by endpoints
+# Create singleton instance
 scanner_engine = PresidioScanner()
